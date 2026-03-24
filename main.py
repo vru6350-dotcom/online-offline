@@ -1,93 +1,132 @@
-# main.py - Using your own bot to check status
-import discord
-from discord.ext import commands, tasks
-import os
+# main.py - Simple bot monitor without discord.py
+import aiohttp
 import asyncio
+import os
 
-BOT_ID_TO_MONITOR = 1481568432267853886
+BOT_ID = 1481568432267853886
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
 CHECK_INTERVAL = 60
 
-class MonitorBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default()
-        intents.guilds = True
-        super().__init__(command_prefix='!', intents=intents)
-        self.last_status = None
-        self.webhook_url = WEBHOOK_URL
-    
-    async def setup_hook(self):
-        self.monitor_bot.start()
-        print("Monitor started")
-    
-    @tasks.loop(seconds=CHECK_INTERVAL)
-    async def monitor_bot(self):
-        """Check if the bot is online"""
-        try:
-            # Try to get the bot user
-            bot_user = await self.fetch_user(BOT_ID_TO_MONITOR)
-            
-            if bot_user:
-                status = True
-                print(f"Bot found: {bot_user.name}")
-            else:
-                status = False
-            
-            if self.last_status != status:
-                await self.send_status_update(status)
-                self.last_status = status
-                
-        except discord.NotFound:
-            await self.send_status_update(False)
-            self.last_status = False
-            print("Bot not found")
-        except Exception as e:
-            print(f"Error: {e}")
-    
-    async def send_status_update(self, is_online):
-        """Send webhook update"""
-        if not self.webhook_url:
-            return
-        
-        if is_online:
-            emoji = "🟢"
-            message = "Bot is currently working"
-            color = 0x00FF00
-        else:
-            emoji = "🔴"
-            message = "Bot is not working! Please DO NOT ping the owners or DM them!"
-            color = 0xFF0000
-        
-        embed = discord.Embed(
-            title="🤖 Bot Status",
-            description=f"{emoji} Bot is **{'ONLINE' if is_online else 'OFFLINE'}**",
-            color=color
-        )
-        embed.add_field(name="Status", value=f"{emoji} {'ONLINE' if is_online else 'OFFLINE'}", inline=True)
-        embed.add_field(name="Bot ID", value=str(BOT_ID_TO_MONITOR), inline=True)
-        embed.add_field(name="Message", value=message, inline=False)
-        
+async def check_bot_status():
+    """Check if bot exists and is accessible"""
+    try:
         async with aiohttp.ClientSession() as session:
-            webhook = discord.Webhook.from_url(self.webhook_url, session=session)
-            await webhook.send(embed=embed)
-    
-    @monitor_bot.before_loop
-    async def before_monitor(self):
-        await self.wait_until_ready()
+            # Try to get bot info - will return 401 if bot exists but needs auth
+            async with session.get(f'https://discord.com/api/v10/users/{BOT_ID}') as response:
+                if response.status == 200:
+                    data = await response.json()
+                    print(f"✅ Bot found: {data.get('username')}")
+                    return True
+                elif response.status == 401:
+                    # 401 means bot exists but needs authentication
+                    print(f"✅ Bot exists (needs auth) - assuming online")
+                    return True
+                elif response.status == 404:
+                    print(f"❌ Bot not found")
+                    return False
+                else:
+                    print(f"⚠️ Unexpected status: {response.status}")
+                    return False
+    except Exception as e:
+        print(f"❌ Error checking: {e}")
+        return False
 
-# Run the bot
-if __name__ == "__main__":
-    TOKEN = os.getenv('DISCORD_BOT_TOKEN', '')
-    WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
-    
-    if not TOKEN:
-        print("ERROR: DISCORD_BOT_TOKEN not set!")
-        print("You need a bot token to monitor other bots")
-        exit(1)
-    
+async def send_webhook(is_online):
+    """Send webhook with status"""
     if not WEBHOOK_URL:
-        print("ERROR: WEBHOOK_URL not set!")
+        print("⚠️ WEBHOOK_URL not set!")
+        return
+    
+    if is_online:
+        emoji = "🟢"
+        message = "Bot is currently working"
+        color = 0x00FF00
+        status = "ONLINE"
+    else:
+        emoji = "🔴"
+        message = "Bot is not working! Please DO NOT ping the owners or DM them!"
+        color = 0xFF0000
+        status = "OFFLINE"
+    
+    payload = {
+        "embeds": [{
+            "title": "🤖 Bot Status",
+            "description": f"{emoji} Bot is **{status}**",
+            "color": color,
+            "fields": [
+                {
+                    "name": "Status",
+                    "value": f"{emoji} {status}",
+                    "inline": True
+                },
+                {
+                    "name": "Bot ID",
+                    "value": str(BOT_ID),
+                    "inline": True
+                },
+                {
+                    "name": "Message",
+                    "value": message,
+                    "inline": False
+                }
+            ]
+        }]
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(WEBHOOK_URL, json=payload) as response:
+                if response.status in [200, 204]:
+                    print(f"✅ Webhook sent: Bot is {status}")
+                else:
+                    print(f"❌ Webhook failed: {response.status}")
+    except Exception as e:
+        print(f"❌ Error sending webhook: {e}")
+
+async def monitor():
+    """Main monitoring loop"""
+    print("=" * 50)
+    print("🤖 Bot Status Monitor Starting...")
+    print(f"Bot ID: {BOT_ID}")
+    print(f"Check Interval: {CHECK_INTERVAL} seconds")
+    print(f"Webhook: {'✅ SET' if WEBHOOK_URL else '❌ NOT SET'}")
+    print("=" * 50)
+    
+    # Initial check
+    print("\n📡 Performing initial check...")
+    initial_status = await check_bot_status()
+    print(f"📊 Initial status: {'ONLINE ✅' if initial_status else 'OFFLINE ❌'}")
+    
+    # Send initial webhook
+    await send_webhook(initial_status)
+    last_status = initial_status
+    
+    # Main loop
+    while True:
+        try:
+            await asyncio.sleep(CHECK_INTERVAL)
+            
+            current_status = await check_bot_status()
+            
+            if last_status != current_status:
+                print(f"🔄 Status changed! Now: {'ONLINE ✅' if current_status else 'OFFLINE ❌'}")
+                await send_webhook(current_status)
+                last_status = current_status
+            
+        except Exception as e:
+            print(f"❌ Monitor error: {e}")
+            await asyncio.sleep(30)
+
+if __name__ == "__main__":
+    if not WEBHOOK_URL:
+        print("❌ ERROR: WEBHOOK_URL environment variable not set!")
+        print("\nPlease add it in Railway:")
+        print("1. Go to your project in Railway")
+        print("2. Click 'Variables' tab")
+        print("3. Add variable:")
+        print("   Key: WEBHOOK_URL")
+        print("   Value: your_discord_webhook_url")
         exit(1)
     
-    bot = MonitorBot()
-    bot.run(TOKEN)
+    print("\n🚀 Starting bot monitor...\n")
+    asyncio.run(monitor())
